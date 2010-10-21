@@ -1,12 +1,14 @@
 import time
 
 from twisted.internet import address
-from twisted.web import http
+from twisted.web import http, static, html
+from twisted.web.resource import Resource
 from nevow import rend, url, loaders, tags as T
 from nevow.inevow import IRequest
 from nevow.static import File as nevow_File # TODO: merge with static.File?
 from nevow.util import resource_filename
 from formless import webform
+from hashlib import sha256
 
 import allmydata # to display import path
 from allmydata import get_package_versions_string
@@ -150,6 +152,66 @@ class NoReliability(rend.Page):
 </html>
 ''')
 
+def sfile(name):
+    return static.File(resource_filename("allmydata.web", name))
+def contents(name):
+    return open(resource_filename("allmydata.web", name), "rb").read()
+
+class InvitationMaker(Resource):
+    def __init__(self, client):
+        Resource.__init__(self)
+        self.client = client
+    def render_POST(self, request):
+        petname = get_arg(request, "petname")
+        template = contents("generate-invitation2.html")
+        return template % {"invite_code": "1234",
+                           "petname": html.escape(petname),
+                           }
+
+class InvitationAcceptor(Resource):
+    def __init__(self, client):
+        Resource.__init__(self)
+        self.client = client
+    def render_POST(self, request):
+        invite_code = get_arg(request, "invite_code")
+        petname = get_arg(request, "petname")
+        template = contents("accept-invitation2.html")
+        return template % {"petname": html.escape(petname)}
+
+class ControlPanel(Resource):
+    def __init__(self, client):
+        Resource.__init__(self)
+        self.client = client
+        # putChild("") makes /private/KEY/ work (as opposed to /private/KEY
+        # without the trailing slash), which lets us use relative links from
+        # this page
+        self.putChild("", self)
+        self.putChild("generate-invitation1",
+                      sfile("generate-invitation1.html"))
+        self.putChild("generate-invitation2", InvitationMaker(client))
+        self.putChild("accept-invitation1", sfile("accept-invitation1.html"))
+        self.putChild("accept-invitation2", InvitationAcceptor(client))
+
+    def render_GET(self, request):
+        return contents("control.html")
+
+class ControlPanelGuard(Resource):
+
+    def __init__(self, client):
+        Resource.__init__(self)
+        self.client = client
+
+    def render_GET(self, request):
+        return "I want a key. Look in ~/.tahoe/private/control.key\n"
+
+    def getChild(self, name, request):
+        key = self.client.get_control_url_key()
+        # constant-time comparison
+        if sha256(key).digest() != sha256(name).digest():
+            raise WebError("bad key in /private/KEY request\n")
+        return ControlPanel(self.client)
+
+
 class Root(rend.Page):
 
     addSlash = True
@@ -174,6 +236,7 @@ class Root(rend.Page):
         self.child_named = FileHandler(client)
         self.child_status = status.Status(client.get_history())
         self.child_statistics = status.Statistics(client.stats_provider)
+        self.child_private = ControlPanelGuard(client)
         def f(name):
             return nevow_File(resource_filename('allmydata.web', name))
         self.putChild("download_status_timeline.js", f("download_status_timeline.js"))
