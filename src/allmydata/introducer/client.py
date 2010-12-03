@@ -203,6 +203,7 @@ class IntroducerClient(service.Service, Referenceable):
                  "FURL": furl,
                  "remoteinterface-name": remoteinterface_name,
 
+                 "NEW-EXCITING-THINGY": "WOW!",
                  "nickname": self._nickname,
                  "app-versions": self._app_versions,
                  "my-version": self._my_version,
@@ -317,6 +318,7 @@ class IntroducerClient(service.Service, Referenceable):
 
         for (service_name2,cb,args,kwargs) in self._local_subscribers:
             if service_name2 == service_name:
+                print "delivering announcement, key %r" % (key_s,)
                 eventually(cb, key_s, ann_d, *args, **kwargs)
 
     def remote_set_encoding_parameters(self, parameters):
