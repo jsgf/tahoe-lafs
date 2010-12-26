@@ -6,7 +6,7 @@ from twisted.application import service
 
 from zope.interface import implements
 from allmydata.interfaces import RIStorageServer, IStatsProducer
-from allmydata.util import fileutil, idlib, log, time_format
+from allmydata.util import fileutil, idlib, log, time_format, keyutil
 import allmydata # for __full_version__
 
 from allmydata.storage.common import si_b2a, si_a2b, storage_index_to_dir
@@ -563,8 +563,7 @@ class StorageServerAndAccountant(StorageServer):
 
     def remote_get_account(self, msg, sig, pubkey_vs):
         print "GETTING ACCOUNT", msg
-        from allmydata.scripts.admin import parse_pubkey
-        vk = parse_pubkey(pubkey_vs)
+        vk = keyutil.parse_pubkey(pubkey_vs)
         vk.verify(sig, msg)
         account = self.accountant.get_account(pubkey_vs, self)
         msg_d = simplejson.loads(msg.decode("utf-8"))
