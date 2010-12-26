@@ -320,8 +320,8 @@ class Client(node.Node, pollmixin.PollMixin):
     def init_client_storage_broker(self):
         def _make_key():
             sk_vs,vk_vs = keyutil.make_keypair()
-            return sk_vs # priv-v0-BASE32
-        sk_vs = self.get_or_create_private_config("client_key", _make_key)
+            return sk_vs+"\n" # priv-v0-BASE32
+        sk_vs = self.get_or_create_private_config("client.key", _make_key)
         self.client_key = keyutil.parse_privkey(sk_vs) # (sk, vk_vs)
         client_info = {"nickname": unicode(self.nickname)}
         # create a StorageFarmBroker object, for use by Uploader/Downloader
