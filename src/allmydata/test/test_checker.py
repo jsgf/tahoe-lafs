@@ -30,7 +30,7 @@ class WebResultsRendering(unittest.TestCase, WebRenderingMixin):
                       "my-version": "ver",
                       "oldest-supported": "oldest",
                       }
-            s = NativeStorageServer(peerid, ann_d)
+            s = NativeStorageServer(peerid, ann_d, None)
             sb.test_add_server(peerid, s)
         c = FakeClient()
         c.storage_broker = sb
