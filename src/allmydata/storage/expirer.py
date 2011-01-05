@@ -427,17 +427,41 @@ class LeaseCheckingCrawler(ShareCrawler):
         return state
 
 
+SCHEMA_v1 = """
+CREATE TABLE version
+(
+ version INTEGER -- contains one row, set to 1
+);
+
+CREATE TABLE leases
+(
+ `storage_index` VARCHAR(26),
+ `ownernum` INTEGER,
+ `size` INTEGER
+);
+
+CREATE UNIQUE INDEX `storage_index` ON leases (`storage_index`);
+CREATE UNIQUE INDEX `ownernum` ON leases (`ownernum`);
+"""
+
 class AccountingCrawler(ShareCrawler):
-    """I manage a table of total space used per ownerid. Most of the time,
-    this table is stored in a cache..
+    """I manage a SQLite table of which leases are owned by which ownerid, to
+    support efficient calculation of total space used per ownerid. The
+    sharefiles (and their leaseinfo fields) is the canonical source: the
+    database is merely a speedup, generated/corrected periodically by this
+    crawler. The crawler both handles the initial DB creation, and fixes the
+    DB when changes have been made outside the storage-server's awareness
+    (e.g. when the admin deletes a sharefile with /bin/rm).
     """
 
-    minimum_cycle_time = 60*60 # we don't need this more than once an hour
+    slow_start = 7*60 # wait 7 minutes after startup
+    minimum_cycle_time = 12*60*60 # not more than twice per day
 
     # My main purpose is to regenerate
 
-    def __init__(self, server, statefile):
+    def __init__(self, server, statefile, dbfile):
         ShareCrawler.__init__(self, server, statefile)
+        self._dbfile = dbfile
 
     def add_initial_state(self):
         # ["bucket-counts"][cyclenum][prefix] = number
