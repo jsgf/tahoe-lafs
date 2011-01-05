@@ -5,9 +5,6 @@ from allmydata.storage.common import UnknownMutableContainerVersionError, \
      UnknownImmutableContainerVersionError
 from twisted.python import log as twlog
 
-class ShareInfo:
-    pass
-
 class LeaseCheckingCrawler(ShareCrawler):
     """I examine the leases on all shares, determining which are still valid
     and which have expired. I can remove the expired leases (if so
@@ -209,7 +206,6 @@ class LeaseCheckingCrawler(ShareCrawler):
         self.increment(so_far["leases-per-share-histogram"], num_leases, 1)
         self.increment_space("examined", s, sharetype)
 
-        shareinfo = ShareInfo()
         would_keep_share = [1, 1, 1, sharetype]
 
         if self.expiration_enabled:
