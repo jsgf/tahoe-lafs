@@ -1,5 +1,5 @@
 import time, os, pickle, struct
-from allmydata.storage.crawler import ShareCrawler
+from allmydata.storage.crawler import ShareCrawler, TimeSliceExceeded
 from allmydata.storage.shares import get_share_file
 from allmydata.storage.common import UnknownMutableContainerVersionError, \
      UnknownImmutableContainerVersionError
@@ -457,46 +457,55 @@ class AccountingCrawler(ShareCrawler):
     slow_start = 7*60 # wait 7 minutes after startup
     minimum_cycle_time = 12*60*60 # not more than twice per day
 
-    # My main purpose is to regenerate
-
     def __init__(self, server, statefile, dbfile):
         ShareCrawler.__init__(self, server, statefile)
         self._dbfile = dbfile
-
-    def add_initial_state(self):
-        # ["bucket-counts"][cyclenum][prefix] = number
-        # ["last-complete-cycle"] = cyclenum # maintained by base class
-        # ["last-complete-bucket-count"] = number
-        # ["storage-index-samples"][prefix] = (cyclenum,
-        #                                      list of SI strings (base32))
-        self.state.setdefault("bucket-counts", {})
-        self.state.setdefault("last-complete-bucket-count", None)
-        self.state.setdefault("storage-index-samples", {})
+        self._do_expire = False
+        self._expire_time = None
 
     def process_prefixdir(self, cycle, prefix, prefixdir, buckets, start_slice):
-        # we override process_prefixdir() because we don't want to look at
-        # the individual buckets. We'll save state after each one. On my
-        # laptop, a mostly-empty storage server can process about 70
-        # prefixdirs in a 1.0s slice.
-        if cycle not in self.state["bucket-counts"]:
-            self.state["bucket-counts"][cycle] = {}
-        self.state["bucket-counts"][cycle][prefix] = len(buckets)
-        if prefix in self.prefixes[:self.num_sample_prefixes]:
-            self.state["storage-index-samples"][prefix] = (cycle, buckets)
+        # start by removing any leftover DB rows: this needs to happen in the
+        # same reactor turn as the os.listdir() that produced 'buckets'
+        db_buckets = set(FETCH_BUCKETS_FROM_DB())
+        leftover = db_buckets - set(buckets)
+        REMOVE_BUCKETS_FROM_DB(leftover)
 
-    def finished_cycle(self, cycle):
-        last_counts = self.state["bucket-counts"].get(cycle, [])
-        if len(last_counts) == len(self.prefixes):
-            # great, we have a whole cycle.
-            num_buckets = sum(last_counts.values())
-            self.state["last-complete-bucket-count"] = num_buckets
-            # get rid of old counts
-            for old_cycle in list(self.state["bucket-counts"].keys()):
-                if old_cycle != cycle:
-                    del self.state["bucket-counts"][old_cycle]
-        # get rid of old samples too
-        for prefix in list(self.state["storage-index-samples"].keys()):
-            old_cycle,buckets = self.state["storage-index-samples"][prefix]
-            if old_cycle != cycle:
-                del self.state["storage-index-samples"][prefix]
+        # now we can walk the rest. Make sure to sync the db on the way out.
+        try:
+            ShareCrawler.process_prefixdir(self, cycle,
+                                           prefix, prefixdir,
+                                           buckets, start_slice)
+        except TimeSliceExceeded:
+            db.SYNC()
+            raise
+        db.SYNC()
 
+    def process_bucket(self, cycle, prefix, prefixdir, storage_index_b32):
+        db_rows = FETCH_ROWS_FROM_DB(storage_index_b32)
+        leases = GET_LEASEINFO(prefixdir+storage_index_b32)
+        MAKE_ROWS_MATCH_LEASES()
+        # we sync the DB later, just before we update the state file, to
+        # amortize the db write costs
+
+    def finished_prefix(self, cycle, prefix):
+        if not self._do_expire:
+            return
+        expired = db.GET_EXPIRED(self._expire_time)
+        db.REMOVE_EXPIRED()
+        FIGURE_OUT_DEAD_SHARES()
+        DELETE_DEAD_SHARES()
+
+
+    # these methods are for outside callers to use
+
+    def set_lease_expiration(self, enable, expire_time=None):
+        """Arrange to remove all leases that are currently expired, and to
+        delete all shares without remaining leases. The actual removals will
+        be done later, as the crawler finishes each prefix."""
+        self._do_expire = enable
+        self._expire_time = expire_time
+
+    def db_is_incomplete(self):
+        # don't bother looking at the sqlite database: it's certainly not
+        # complete.
+        return state["last-cycle-finished"] is None
