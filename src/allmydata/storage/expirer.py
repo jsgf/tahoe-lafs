@@ -466,6 +466,7 @@ class AccountingCrawler(ShareCrawler):
     def process_prefixdir(self, cycle, prefix, prefixdir, buckets, start_slice):
         # start by removing any leftover DB rows: this needs to happen in the
         # same reactor turn as the os.listdir() that produced 'buckets'
+        "SELECT UNIQUE(storage_index) from leases WHERE storage_index LIKE ^prefix"
         db_buckets = set(FETCH_BUCKETS_FROM_DB())
         leftover = db_buckets - set(buckets)
         REMOVE_BUCKETS_FROM_DB(leftover)
