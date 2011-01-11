@@ -436,11 +436,12 @@ CREATE TABLE version
 CREATE TABLE leases
 (
  `storage_index` VARCHAR(26),
+ `shnum` INTEGER,
  `ownernum` INTEGER,
  `size` INTEGER
 );
 
-CREATE UNIQUE INDEX `storage_index` ON leases (`storage_index`);
+CREATE UNIQUE INDEX `storage_index` ON leases (`storage_index`,`shnum`);
 CREATE UNIQUE INDEX `ownernum` ON leases (`ownernum`);
 """
 
@@ -459,17 +460,29 @@ class AccountingCrawler(ShareCrawler):
 
     def __init__(self, server, statefile, dbfile):
         ShareCrawler.__init__(self, server, statefile)
-        self._dbfile = dbfile
+        (self._sqlite,
+         self._db) = dbutil.get_db(dbfile, create_version=(SCHEMA_v1, 1))
+        self._cursor = self._db.cursor()
         self._do_expire = False
         self._expire_time = None
 
     def process_prefixdir(self, cycle, prefix, prefixdir, buckets, start_slice):
         # start by removing any leftover DB rows: this needs to happen in the
         # same reactor turn as the os.listdir() that produced 'buckets'
-        "SELECT UNIQUE(storage_index) from leases WHERE storage_index LIKE ^prefix"
-        db_buckets = set(FETCH_BUCKETS_FROM_DB())
+        c = self._cursor
+        c.execute("SELECT UNIQUE(`storage_index`)" # XXX 'unique' syntax?
+                  " FROM `leases`"
+                  " WHERE `storage_index` LIKE ^?", # XXX syntax?
+                  (prefix,))
+        db_buckets = set([row[0] for row in c.fetchall()])
         leftover = db_buckets - set(buckets)
-        REMOVE_BUCKETS_FROM_DB(leftover)
+        if leftover:
+            qmarks = "(" + ",".join(["?"] * len(leftover)) + ")"
+            c.execute("DELETE"
+                      " FROM `leases`"
+                      " WHERE `storage_index` IN "+qmarks,
+                      leftover)
+            self._db.commit()
 
         # now we can walk the rest. Make sure to sync the db on the way out.
         try:
@@ -477,16 +490,68 @@ class AccountingCrawler(ShareCrawler):
                                            prefix, prefixdir,
                                            buckets, start_slice)
         except TimeSliceExceeded:
-            db.SYNC()
+            self._db.commit()
             raise
-        db.SYNC()
+        self._db.commit()
+
+    # ideally, leases should be on buckets, not shares, so none of the
+    # following data structures would be eyed on shnum. putting two shares on
+    # the same server would mean 'size' is double the usualy value, but would
+    # not otherwise be visible in the leasedb. But, since we want share files
+    # to be canonical, leases need to live inside shares for now, which means
+    # the leasedb is aware of shnums.
 
     def process_bucket(self, cycle, prefix, prefixdir, storage_index_b32):
-        db_rows = FETCH_ROWS_FROM_DB(storage_index_b32)
-        leases = GET_LEASEINFO(prefixdir+storage_index_b32)
-        MAKE_ROWS_MATCH_LEASES()
+        bucketdir = os.path.join(prefixdir, storage_index_b32)
+        c = self._cursor
+        c.execute("SELECT `shnum`,`ownernum`,`size`"
+                  " FROM `leases`"
+                  " WHERE `storage_index`=?",
+                  (storage_index_b32,))
+        old_db_data = {} # maps (shnum,ownernum) to size
+        for (shnum, ownernum, size) in c.fetchall():
+            if (shnum,ownernum) not in old_db_data:
+                old_db_data[(shnum,ownernum)] = size
+        old_shnums = set(old_db_data.keys())
+
+        leaseinfos = {} # maps (shnum,ownernum) to size
+        for fn in os.listdir(bucketdir):
+            try:
+                shnum = int(fn)
+            except ValueError:
+                continue # non-numeric means not a sharefile
+            sharefile = os.path.join(bucketdir, fn)
+            for (ownernum,size) in self.process_share(sharefile):
+                leaseinfos[(shnum,ownernum)] = size
+        new_shnums = set(leaseinfos.keys())
+
+        removed_shnums = old_shnums - new_shnums
+        for shnum in removed_shnums:
+            c.execute("DELETE FROM `leases`"
+                      " WHERE `storage_index`=?  AND `shnum`=?",
+                      (storage_index_b32, shnum))
+        added_shnums = new_shnums - old_shnums
+        for shnum in added_shnums:
+            ownernum, size = leaseinfos[shnum]
+            c.execute("INSERT INTO `leases`"
+                      " VALUES (?,?,?,?)",
+                      (storage_index_b32, shnum, ownernum, size))
+        already_shnums = new_shnums.intersection(old_shnums)
+        for shnum in already_shnums:
+            if old_db_data[shnum] != leaseinfos[shnum]:
+                ownernum, size = leaseinfos[shnum]
+                c.execute("UPDATE `leases` SET `ownernum`=?, `size`=?"
+                          " WHERE `storage_index`=? AND `shnum`=?",
+                          (ownernum, size, storage_index_b32, shnum))
+
         # we sync the DB later, just before we update the state file, to
         # amortize the db write costs
+
+    def process_share(self, sharefilename):
+        s = os.stat(sharefilename)
+        size = s.st_size
+        sf = get_share_file(sharefilename)
+        return [(li.get_ownernum(), size) for li in sf.get_leases()]
 
     def finished_prefix(self, cycle, prefix):
         if not self._do_expire:
