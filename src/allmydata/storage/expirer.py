@@ -3,6 +3,7 @@ from allmydata.storage.crawler import ShareCrawler, TimeSliceExceeded
 from allmydata.storage.shares import get_share_file
 from allmydata.storage.common import UnknownMutableContainerVersionError, \
      UnknownImmutableContainerVersionError
+from allmydata.util import dbutil
 from twisted.python import log as twlog
 
 class LeaseCheckingCrawler(ShareCrawler):
@@ -510,9 +511,8 @@ class AccountingCrawler(ShareCrawler):
                   (storage_index_b32,))
         old_db_data = {} # maps (shnum,ownernum) to size
         for (shnum, ownernum, size) in c.fetchall():
-            if (shnum,ownernum) not in old_db_data:
-                old_db_data[(shnum,ownernum)] = size
-        old_shnums = set(old_db_data.keys())
+            old_db_data[(shnum,ownernum)] = size
+        old_leases = set(old_db_data.keys())
 
         leaseinfos = {} # maps (shnum,ownernum) to size
         for fn in os.listdir(bucketdir):
@@ -520,26 +520,33 @@ class AccountingCrawler(ShareCrawler):
                 shnum = int(fn)
             except ValueError:
                 continue # non-numeric means not a sharefile
-            sharefile = os.path.join(bucketdir, fn)
-            for (ownernum,size) in self.process_share(sharefile):
+            sharefilename = os.path.join(bucketdir, fn)
+            size = os.stat(sharefilename).st_size
+            sf = get_share_file(sharefilename)
+            for li in sf.get_leases():
+                # TODO: there may be multiple leases with the same ownernum
+                ownernum = li.get_ownernum()
                 leaseinfos[(shnum,ownernum)] = size
-        new_shnums = set(leaseinfos.keys())
+        new_leases = set(leaseinfos.keys())
 
-        removed_shnums = old_shnums - new_shnums
-        for shnum in removed_shnums:
+        removed_leases = old_leases - new_leases
+        for lease in removed_leases:
+            (shnum,ownernum) = lease
             c.execute("DELETE FROM `leases`"
-                      " WHERE `storage_index`=?  AND `shnum`=?",
-                      (storage_index_b32, shnum))
-        added_shnums = new_shnums - old_shnums
-        for shnum in added_shnums:
-            ownernum, size = leaseinfos[shnum]
+                      " WHERE `storage_index`=?  AND `shnum`=? AND `ownernum`=?",
+                      (storage_index_b32, shnum, ownernum))
+        added_leases = new_leases - old_leases
+        for lease in added_leases:
+            (shnum,ownernum) = lease
+            size = leaseinfos[lease]
             c.execute("INSERT INTO `leases`"
                       " VALUES (?,?,?,?)",
                       (storage_index_b32, shnum, ownernum, size))
-        already_shnums = new_shnums.intersection(old_shnums)
-        for shnum in already_shnums:
-            if old_db_data[shnum] != leaseinfos[shnum]:
-                ownernum, size = leaseinfos[shnum]
+        already_leases = new_leases.intersection(old_leases)
+        for lease in already_leases:
+            if old_db_data[lease] != leaseinfos[lease]:
+                (shnum,ownernum) = lease
+                size = leaseinfos[lease]
                 c.execute("UPDATE `leases` SET `ownernum`=?, `size`=?"
                           " WHERE `storage_index`=? AND `shnum`=?",
                           (ownernum, size, storage_index_b32, shnum))
@@ -547,17 +554,12 @@ class AccountingCrawler(ShareCrawler):
         # we sync the DB later, just before we update the state file, to
         # amortize the db write costs
 
-    def process_share(self, sharefilename):
-        s = os.stat(sharefilename)
-        size = s.st_size
-        sf = get_share_file(sharefilename)
-        return [(li.get_ownernum(), size) for li in sf.get_leases()]
-
     def finished_prefix(self, cycle, prefix):
         if not self._do_expire:
             return
-        expired = db.GET_EXPIRED(self._expire_time)
-        db.REMOVE_EXPIRED()
+        c = self._cursor
+        expired = c.execute(GET_EXPIRED,self._expire_time)
+        c.execute(REMOVE_EXPIRED, expired)
         FIGURE_OUT_DEAD_SHARES()
         DELETE_DEAD_SHARES()
 
@@ -574,4 +576,4 @@ class AccountingCrawler(ShareCrawler):
     def db_is_incomplete(self):
         # don't bother looking at the sqlite database: it's certainly not
         # complete.
-        return state["last-cycle-finished"] is None
+        return self.state["last-cycle-finished"] is None
