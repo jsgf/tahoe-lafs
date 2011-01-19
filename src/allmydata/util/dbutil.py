@@ -1,4 +1,6 @@
 
+import sys
+
 class DBError(Exception):
     pass
 
