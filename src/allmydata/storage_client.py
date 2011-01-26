@@ -262,29 +262,40 @@ class NativeStorageServer(Referenceable):
                 name=self.get_name(), version=rref.version,
                 facility="tahoe.storage_broker", umid="SWmJYg",
                 level=log.NOISY, parent=lp)
-        if "accounting-v1" not in rref.version or not self.client_key:
+        print "rref.version", rref.version
+        v = rref.version.get("http://allmydata.org/tahoe/protocols/storage/v1", {})
+        if "accounting-v1" not in v or not self.client_key:
+            print "no accounting, or no key"
             self.last_connect_time = time.time()
             self.remote_host = rref.getPeer()
             self.rref = rref
             rref.notifyOnDisconnect(self._lost)
             return
+        print "doing upgrade"
         # the RIStorageServer we're talking to can upgrade us to a real
         # Account. We are the receiver.
-        me = self.tub.registerReferenceable(self)
+        me = self.tub.registerReference(self)
         msg_d = {"please-give-Account-to-rxFURL": me}
         msg = simplejson.dumps(msg_d).encode("utf-8")
-        sk = self.client_key
+        print msg
+        sk,vk_vs = self.client_key
         sig = sk.sign(msg)
-        pubkey_s = sk.get_verifying_key().to_string() # think about ascii
-        d = rref.callRemote("get_account", msg, sig, pubkey_s)
+        d = rref.callRemote("get_account", msg, sig, vk_vs)
         return d
 
     def remote_account(self, account):
-        # now *this* we can use
+        d = add_version_to_remote_reference(account, self.VERSION_DEFAULTS)
+        d.addCallback(self._got_versioned_remote_account)
+        return d
+    def _got_versioned_remote_account(self, account):
+        # finally. now *this* we can use
         self.last_connect_time = time.time()
         self.remote_host = account.getPeer()
         self.rref = account
         account.notifyOnDisconnect(self._lost)
+        def _got_message(msg):
+            print "_got_message", msg
+        account.callRemote("get_client_message").addCallback(_got_message).addErrback(log.err)
 
 
     def get_rref(self):

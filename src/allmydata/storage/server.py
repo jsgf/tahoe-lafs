@@ -549,15 +549,17 @@ class StorageServer(service.MultiService, Referenceable):
                 level=log.SCARY, umid="SGx2fA")
         return None
 
-class Account:
+class Account(Referenceable):
     def __init__(self, owner_num, server):
         self.owner_num = owner_num
         self.server = server
 
+    def remote_get_version(self):
+        return self.server.remote_get_version()
     def remote_get_status(self):
         return {"write": True, "read": True, "save": True}
     def remote_get_client_message(self):
-        return {}
+        return {"message": "CLIENT MESSAGE WOO!"}
     # all other RIStorageServer methods should pass through to self.server
     # but add owner_num=
 
@@ -610,19 +612,21 @@ class StorageServerAndAccountant(StorageServer):
 
     def set_tub(self, tub):
         self.tub = tub
-    def remote_get_account(self, msg, sig, pubkey_s):
+    def remote_get_account(self, msg, sig, pubkey_vs):
         print "GETTING ACCOUNT", msg
-        pk = ecdsa.VerifyingKey.from_string(pubkey_s)
-        pk.verify(msg, sig)
-        account = self.get_account(pubkey_s) # think about ascii
+        from allmydata.scripts.admin import parse_pubkey
+        vk = parse_pubkey(pubkey_vs)
+        vk.verify(sig, msg)
+        account_name = pubkey_vs # think about ascii, kinda wordy
+        account = self.get_account(account_name)
         msg_d = simplejson.loads(msg.decode("utf-8"))
-        rxFURL = msg_d["please-give-Account-to-rxFURL"]
+        rxFURL = msg_d["please-give-Account-to-rxFURL"].encode("ascii")
         d = self.tub.getReference(rxFURL)
         d.addCallback(lambda rx: rx.callRemote("account", account))
         return d
 
     def get_account(self, pubkey_s):
         #owner_num = X(pubkey_s)
-        owner_num = 1
+        owner_num = 2
         server = self
         return Account(owner_num, server)

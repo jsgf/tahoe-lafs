@@ -310,14 +310,12 @@ class Client(node.Node, pollmixin.PollMixin):
         self.init_nodemaker()
 
     def init_client_storage_broker(self):
+        from allmydata.scripts.admin import make_keypair, parse_privkey
         def _make_key():
-            sk = ecdsa.SigningKey.generate()
-            sk_s = "clientpriv-v1-" + base32.b2a(sk.to_string())
-            return sk_s
-        sk_s = self.get_or_create_private_config("client_key", _make_key)
-        if not sk_s.startswith("clientpriv-v1-"): raise ValueError
-        sk_s = base32.a2b(sk_s[len("clientpriv-v1-"):])
-        self.client_key = ecdsa.SigningKey.from_string(sk_s)
+            sk_vs,vk_vs = make_keypair()
+            return sk_vs # priv-v0-BASE32
+        sk_vs = self.get_or_create_private_config("client_key", _make_key)
+        self.client_key = parse_privkey(sk_vs) # (sk, vk_vs)
         # create a StorageFarmBroker object, for use by Uploader/Downloader
         # (and everybody else who wants to use storage servers)
         sb = storage_client.StorageFarmBroker(self.tub, permute_peers=True,
