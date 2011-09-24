@@ -6,9 +6,10 @@ from twisted.internet import defer
 from twisted.python import failure
 from foolscap.api import DeadReferenceError, RemoteException, eventually, \
                          fireEventually
-from allmydata.util import base32, hashutil, idlib, log, deferredutil
+from allmydata.util import base32, hashutil, log, deferredutil
 from allmydata.util.dictutil import DictOfSets
 from allmydata.storage.server import si_b2a
+from allmydata.storage_client import IServer
 from allmydata.interfaces import IServermapUpdaterStatus
 from pycryptopp.publickey import rsa
 
@@ -34,8 +35,9 @@ class UpdateStatus:
         self.started = time.time()
         self.finished = None
 
-    def add_per_server_time(self, serverid, op, sent, elapsed):
+    def add_per_server_time(self, server, op, sent, elapsed):
         assert op in ("query", "late", "privkey")
+        serverid = server.get_serverid()
         if serverid not in self.timings["per_server"]:
             self.timings["per_server"][serverid] = []
         self.timings["per_server"][serverid].append((op,sent,elapsed))
@@ -69,8 +71,8 @@ class UpdateStatus:
         self.storage_index = si
     def set_mode(self, mode):
         self.mode = mode
-    def set_privkey_from(self, serverid):
-        self.privkey_from = serverid
+    def set_privkey_from(self, server):
+        self.privkey_from = server.get_serverid()
     def set_status(self, status):
         self.status = status
     def set_progress(self, value):
@@ -95,30 +97,30 @@ class ServerMap:
     has changed since I last retrieved this data'. This reduces the chances
     of clobbering a simultaneous (uncoordinated) write.
 
-    @ivar servermap: a dictionary, mapping a (serverid, shnum) tuple to a
+    @ivar servermap: a dictionary, mapping a (server, shnum) tuple to a
                      (versionid, timestamp) tuple. Each 'versionid' is a
                      tuple of (seqnum, root_hash, IV, segsize, datalength,
                      k, N, signed_prefix, offsets)
 
     @ivar connections: maps serverid to a RemoteReference
 
-    @ivar bad_shares: dict with keys of (serverid, shnum) tuples, describing
+    @ivar bad_shares: dict with keys of (server, shnum) tuples, describing
                       shares that I should ignore (because a previous user of
                       the servermap determined that they were invalid). The
                       updater only locates a certain number of shares: if
                       some of these turn out to have integrity problems and
                       are unusable, the caller will need to mark those shares
                       as bad, then re-update the servermap, then try again.
-                      The dict maps (serverid, shnum) tuple to old checkstring.
+                      The dict maps (server, shnum) tuple to old checkstring.
     """
 
     def __init__(self):
         self.servermap = {}
         self.connections = {}
-        self.unreachable_servers = set() # serverids that didn't respond to queries
-        self.reachable_servers = set() # serverids that did respond to queries
+        self.unreachable_servers = set() # servers that didn't respond to queries
+        self.reachable_servers = set() # servers that did respond to queries
         self.problems = [] # mostly for debugging
-        self.bad_shares = {} # maps (serverid,shnum) to old checkstring
+        self.bad_shares = {} # maps (server,shnum) to old checkstring
         self.last_update_mode = None
         self.last_update_time = 0
         self.update_data = {} # (verinfo,shnum) => data
@@ -135,7 +137,7 @@ class ServerMap:
         s.last_update_time = self.last_update_time
         return s
 
-    def mark_bad_share(self, serverid, shnum, checkstring):
+    def mark_bad_share(self, server, shnum, checkstring):
         """This share was found to be bad, either in the checkstring or
         signature (detected during mapupdate), or deeper in the share
         (detected at retrieve time). Remove it from our list of useful
@@ -144,25 +146,26 @@ class ServerMap:
         corrupted or badly signed) so that a repair operation can do the
         test-and-set using it as a reference.
         """
-        key = (serverid, shnum) # record checkstring
+        key = (server, shnum) # record checkstring
         self.bad_shares[key] = checkstring
         self.servermap.pop(key, None)
 
-    def add_new_share(self, serverid, shnum, verinfo, timestamp):
+    def add_new_share(self, server, shnum, verinfo, timestamp):
         """We've written a new share out, replacing any that was there
         before."""
-        key = (serverid, shnum)
+        assert IServer.providedBy(server)
+        key = (server, shnum)
         self.bad_shares.pop(key, None)
         self.servermap[key] = (verinfo, timestamp)
 
     def dump(self, out=sys.stdout):
         print >>out, "servermap:"
 
-        for ( (serverid, shnum), (verinfo, timestamp) ) in self.servermap.items():
+        for ( (server, shnum), (verinfo, timestamp) ) in self.servermap.items():
             (seqnum, root_hash, IV, segsize, datalength, k, N, prefix,
              offsets_tuple) = verinfo
             print >>out, ("[%s]: sh#%d seq%d-%s %d-of-%d len%d" %
-                          (idlib.shortnodeid_b2a(serverid), shnum,
+                          (server.get_name(), shnum,
                            seqnum, base32.b2a(root_hash)[:4], k, N,
                            datalength))
         if self.problems:
@@ -172,43 +175,59 @@ class ServerMap:
         return out
 
     def all_servers(self):
-        return set([serverid
-                    for (serverid, shnum)
+        return set([server
+                    for (server, shnum)
                     in self.servermap])
 
     def all_servers_for_version(self, verinfo):
         """Return a set of serverids that hold shares for the given version."""
-        return set([serverid
-                    for ( (serverid, shnum), (verinfo2, timestamp) )
+        return set([server
+                    for ( (server, shnum), (verinfo2, timestamp) )
                     in self.servermap.items()
                     if verinfo == verinfo2])
+
+    def get_servermap2(self):
+        return self.servermap
+
+    def get_servermap(self):
+        oldstyle_servermap = {}
+        for (server, shnum), value in self.servermap.items():
+            key = (server.get_serverid(), shnum)
+            oldstyle_servermap[key] = value
+        return oldstyle_servermap
 
     def make_sharemap(self):
         """Return a dict that maps shnum to a set of serverids that hold it."""
         sharemap = DictOfSets()
-        for (serverid, shnum) in self.servermap:
-            sharemap.add(shnum, serverid)
+        for (server, shnum) in self.servermap:
+            sharemap.add(shnum, server.get_serverid())
         return sharemap
 
     def make_versionmap(self):
         """Return a dict that maps versionid to sets of (shnum, serverid,
         timestamp) tuples."""
         versionmap = DictOfSets()
-        for ( (serverid, shnum), (verinfo, timestamp) ) in self.servermap.items():
-            versionmap.add(verinfo, (shnum, serverid, timestamp))
+        for ( (server, shnum), (verinfo, timestamp) ) in self.servermap.items():
+            versionmap.add(verinfo, (shnum, server.get_serverid(), timestamp))
         return versionmap
 
     def shares_on_server(self, serverid):
         return set([shnum
-                    for (s_serverid, shnum)
+                    for (server, shnum)
                     in self.servermap
-                    if s_serverid == serverid])
+                    if server.get_serverid() == serverid])
 
     def version_on_server(self, serverid, shnum):
-        key = (serverid, shnum)
-        if key in self.servermap:
-            (verinfo, timestamp) = self.servermap[key]
-            return verinfo
+        # TODO: once this signature is changed to take an IServer, we can use
+        # this:
+        #key = (server, shnum)
+        #if key in self.servermap:
+        #    (verinfo, timestamp) = self.servermap[key]
+        #    return verinfo
+        for key in self.servermap:
+            if (key[0].get_serverid() == serverid and key[1] == shnum):
+                (verinfo, timestamp) = self.servermap[key]
+                return verinfo
         return None
 
     def shares_available(self):
@@ -459,14 +478,13 @@ class ServermapUpdater:
 
         sb = self._storage_broker
         # All of the servers, permuted by the storage index, as usual.
-        full_serverlist = [(s.get_serverid(), s.get_rref())
-                           for s in sb.get_servers_for_psi(self._storage_index)]
+        full_serverlist = list(sb.get_servers_for_psi(self._storage_index))
         self.full_serverlist = full_serverlist # for use later, immutable
         self.extra_servers = full_serverlist[:] # servers are removed as we use them
         self._good_servers = set() # servers who had some shares
         self._empty_servers = set() # servers who don't have any shares
         self._bad_servers = set() # servers to whom our queries failed
-        self._readers = {} # serverid -> dict(sharewriters), filled in
+        self._readers = {} # server -> dict(sharewriters), filled in
                            # after responses come in.
 
         k = self._node.get_required_shares()
@@ -484,8 +502,8 @@ class ServermapUpdater:
 
         if self.mode == MODE_CHECK:
             # We want to query all of the servers.
-            initial_servers_to_query = dict(full_serverlist)
-            must_query = set(initial_servers_to_query.keys())
+            initial_servers_to_query = list(full_serverlist)
+            must_query = set(initial_servers_to_query)
             self.extra_servers = []
         elif self.mode == MODE_WRITE:
             # we're planning to replace all the shares, so we want a good
@@ -519,36 +537,30 @@ class ServermapUpdater:
         # tap if we don't get enough responses)
         # I guess that self._must_query is a subset of
         # initial_servers_to_query?
-        assert set(must_query).issubset(set(initial_servers_to_query))
+        assert must_query.issubset(initial_servers_to_query)
 
         self._send_initial_requests(initial_servers_to_query)
         self._status.timings["initial_queries"] = time.time() - self._started
         return self._done_deferred
 
     def _build_initial_querylist(self):
-        initial_servers_to_query = {}
-        must_query = set()
-        for serverid in self._servermap.all_servers():
-            ss = self._servermap.connections[serverid]
-            # we send queries to everyone who was already in the sharemap
-            initial_servers_to_query[serverid] = ss
-            # and we must wait for responses from them
-            must_query.add(serverid)
+        # we send queries to everyone who was already in the sharemap
+        initial_servers_to_query = set(self._servermap.all_servers())
+        # and we must wait for responses from them
+        must_query = set(initial_servers_to_query)
 
         while ((self.num_servers_to_query > len(initial_servers_to_query))
                and self.extra_servers):
-            (serverid, ss) = self.extra_servers.pop(0)
-            initial_servers_to_query[serverid] = ss
+            initial_servers_to_query.add(self.extra_servers.pop(0))
 
         return initial_servers_to_query, must_query
 
     def _send_initial_requests(self, serverlist):
         self._status.set_status("Sending %d initial queries" % len(serverlist))
         self._queries_outstanding = set()
-        self._sharemap = DictOfSets() # shnum -> [(serverid, seqnum, R)..]
-        for (serverid, ss) in serverlist.items():
-            self._queries_outstanding.add(serverid)
-            self._do_query(ss, serverid, self._storage_index, self._read_size)
+        for server in serverlist:
+            self._queries_outstanding.add(server)
+            self._do_query(server, self._storage_index, self._read_size)
 
         if not serverlist:
             # there is nobody to ask, so we need to short-circuit the state
@@ -561,18 +573,17 @@ class ServermapUpdater:
         # might produce a result.
         return None
 
-    def _do_query(self, ss, serverid, storage_index, readsize):
-        self.log(format="sending query to [%(serverid)s], readsize=%(readsize)d",
-                 serverid=idlib.shortnodeid_b2a(serverid),
-                 readsize=readsize,
+    def _do_query(self, server, storage_index, readsize):
+        self.log(format="sending query to [%(name)s], readsize=%(readsize)d",
+                 name=server.get_name(), readsize=readsize,
                  level=log.NOISY)
-        self._servermap.connections[serverid] = ss
+        self._servermap.connections[server.get_serverid()] = server.get_rref()
         started = time.time()
-        self._queries_outstanding.add(serverid)
-        d = self._do_read(ss, serverid, storage_index, [], [(0, readsize)])
-        d.addCallback(self._got_results, serverid, readsize, (ss, storage_index),
+        self._queries_outstanding.add(server)
+        d = self._do_read(server, storage_index, [], [(0, readsize)])
+        d.addCallback(self._got_results, server, readsize, storage_index,
                       started)
-        d.addErrback(self._query_failed, serverid)
+        d.addErrback(self._query_failed, server)
         # errors that aren't handled by _query_failed (and errors caused by
         # _query_failed) get logged, but we still want to check for doneness.
         d.addErrback(log.err)
@@ -580,24 +591,25 @@ class ServermapUpdater:
         d.addCallback(self._check_for_done)
         return d
 
-    def _do_read(self, ss, serverid, storage_index, shnums, readv):
+    def _do_read(self, server, storage_index, shnums, readv):
+        ss = server.get_rref()
         if self._add_lease:
             # send an add-lease message in parallel. The results are handled
             # separately. This is sent before the slot_readv() so that we can
             # be sure the add_lease is retired by the time slot_readv comes
             # back (this relies upon our knowledge that the server code for
             # add_lease is synchronous).
-            renew_secret = self._node.get_renewal_secret(serverid)
-            cancel_secret = self._node.get_cancel_secret(serverid)
+            renew_secret = self._node.get_renewal_secret(server.get_lease_seed())
+            cancel_secret = self._node.get_cancel_secret(server.get_lease_seed())
             d2 = ss.callRemote("add_lease", storage_index,
                                renew_secret, cancel_secret)
-            # we ignore success
-            d2.addErrback(self._add_lease_failed, serverid, storage_index)
+            # we ignore success, and log failure
+            d2.addErrback(self._add_lease_failed, server, storage_index)
         d = ss.callRemote("slot_readv", storage_index, shnums, readv)
         return d
 
 
-    def _got_corrupt_share(self, e, shnum, serverid, data, lp):
+    def _got_corrupt_share(self, e, shnum, server, data, lp):
         """
         I am called when a remote server returns a corrupt share in
         response to one of our queries. By corrupt, I mean a share
@@ -608,17 +620,17 @@ class ServermapUpdater:
         self.log(format="bad share: %(f_value)s", f_value=str(f),
                  failure=f, parent=lp, level=log.WEIRD, umid="h5llHg")
         # Notify the server that its share is corrupt.
-        self.notify_server_corruption(serverid, shnum, str(e))
+        self.notify_server_corruption(server, shnum, str(e))
         # By flagging this as a bad server, we won't count any of
         # the other shares on that server as valid, though if we
         # happen to find a valid version string amongst those
         # shares, we'll keep track of it so that we don't need
         # to validate the signature on those again.
-        self._bad_servers.add(serverid)
+        self._bad_servers.add(server)
         self._last_failure = f
         # XXX: Use the reader for this?
         checkstring = data[:SIGNED_PREFIX_LENGTH]
-        self._servermap.mark_bad_share(serverid, shnum, checkstring)
+        self._servermap.mark_bad_share(server, shnum, checkstring)
         self._servermap.problems.append(f)
 
 
@@ -635,39 +647,37 @@ class ServermapUpdater:
             self._node._add_to_cache(verinfo, shnum, 0, data)
 
 
-    def _got_results(self, datavs, serverid, readsize, stuff, started):
-        lp = self.log(format="got result from [%(serverid)s], %(numshares)d shares",
-                      serverid=idlib.shortnodeid_b2a(serverid),
-                      numshares=len(datavs))
+    def _got_results(self, datavs, server, readsize, storage_index, started):
+        lp = self.log(format="got result from [%(name)s], %(numshares)d shares",
+                      name=server.get_name(), numshares=len(datavs))
         now = time.time()
         elapsed = now - started
         def _done_processing(ignored=None):
-            self._queries_outstanding.discard(serverid)
-            self._servermap.reachable_servers.add(serverid)
-            self._must_query.discard(serverid)
+            self._queries_outstanding.discard(server)
+            self._servermap.reachable_servers.add(server)
+            self._must_query.discard(server)
             self._queries_completed += 1
         if not self._running:
             self.log("but we're not running, so we'll ignore it", parent=lp)
             _done_processing()
-            self._status.add_per_server_time(serverid, "late", started, elapsed)
+            self._status.add_per_server_time(server, "late", started, elapsed)
             return
-        self._status.add_per_server_time(serverid, "query", started, elapsed)
+        self._status.add_per_server_time(server, "query", started, elapsed)
 
         if datavs:
-            self._good_servers.add(serverid)
+            self._good_servers.add(server)
         else:
-            self._empty_servers.add(serverid)
+            self._empty_servers.add(server)
 
-        ss, storage_index = stuff
         ds = []
 
         for shnum,datav in datavs.items():
             data = datav[0]
-            reader = MDMFSlotReadProxy(ss,
+            reader = MDMFSlotReadProxy(server.get_rref(),
                                        storage_index,
                                        shnum,
                                        data)
-            self._readers.setdefault(serverid, dict())[shnum] = reader
+            self._readers.setdefault(server, dict())[shnum] = reader
             # our goal, with each response, is to validate the version
             # information and share data as best we can at this point --
             # we do this by validating the signature. To do this, we
@@ -677,11 +687,11 @@ class ServermapUpdater:
             if not self._node.get_pubkey():
                 # fetch and set the public key.
                 d = reader.get_verification_key()
-                d.addCallback(lambda results, shnum=shnum, serverid=serverid:
-                    self._try_to_set_pubkey(results, serverid, shnum, lp))
+                d.addCallback(lambda results, shnum=shnum:
+                    self._try_to_set_pubkey(results, server, shnum, lp))
                 # XXX: Make self._pubkey_query_failed?
-                d.addErrback(lambda error, shnum=shnum, serverid=serverid:
-                    self._got_corrupt_share(error, shnum, serverid, data, lp))
+                d.addErrback(lambda error, shnum=shnum:
+                    self._got_corrupt_share(error, shnum, server, data, lp))
             else:
                 # we already have the public key.
                 d = defer.succeed(None)
@@ -695,16 +705,16 @@ class ServermapUpdater:
             #   bytes of the share on the storage server, so we
             #   shouldn't need to fetch anything at this step.
             d2 = reader.get_verinfo()
-            d2.addErrback(lambda error, shnum=shnum, serverid=serverid:
-                self._got_corrupt_share(error, shnum, serverid, data, lp))
+            d2.addErrback(lambda error, shnum=shnum:
+                self._got_corrupt_share(error, shnum, server, data, lp))
             # - Next, we need the signature. For an SDMF share, it is
             #   likely that we fetched this when doing our initial fetch
             #   to get the version information. In MDMF, this lives at
             #   the end of the share, so unless the file is quite small,
             #   we'll need to do a remote fetch to get it.
             d3 = reader.get_signature()
-            d3.addErrback(lambda error, shnum=shnum, serverid=serverid:
-                self._got_corrupt_share(error, shnum, serverid, data, lp))
+            d3.addErrback(lambda error, shnum=shnum:
+                self._got_corrupt_share(error, shnum, server, data, lp))
             #  Once we have all three of these responses, we can move on
             #  to validating the signature
 
@@ -712,10 +722,10 @@ class ServermapUpdater:
             # fetch it here.
             if self._need_privkey:
                 d4 = reader.get_encprivkey()
-                d4.addCallback(lambda results, shnum=shnum, serverid=serverid:
-                    self._try_to_validate_privkey(results, serverid, shnum, lp))
-                d4.addErrback(lambda error, shnum=shnum, serverid=serverid:
-                    self._privkey_query_failed(error, shnum, data, lp))
+                d4.addCallback(lambda results, shnum=shnum:
+                    self._try_to_validate_privkey(results, server, shnum, lp))
+                d4.addErrback(lambda error, shnum=shnum:
+                    self._privkey_query_failed(error, server, shnum, lp))
             else:
                 d4 = defer.succeed(None)
 
@@ -740,11 +750,11 @@ class ServermapUpdater:
 
             dl = defer.DeferredList([d, d2, d3, d4, d5])
             dl.addBoth(self._turn_barrier)
-            dl.addCallback(lambda results, shnum=shnum, serverid=serverid:
-                self._got_signature_one_share(results, shnum, serverid, lp))
+            dl.addCallback(lambda results, shnum=shnum:
+                self._got_signature_one_share(results, shnum, server, lp))
             dl.addErrback(lambda error, shnum=shnum, data=data:
-               self._got_corrupt_share(error, shnum, serverid, data, lp))
-            dl.addCallback(lambda verinfo, shnum=shnum, serverid=serverid, data=data:
+               self._got_corrupt_share(error, shnum, server, data, lp))
+            dl.addCallback(lambda verinfo, shnum=shnum, data=data:
                 self._cache_good_sharedata(verinfo, shnum, now, data))
             ds.append(dl)
         # dl is a deferred list that will fire when all of the shares
@@ -775,31 +785,31 @@ class ServermapUpdater:
         return fireEventually(result)
 
 
-    def _try_to_set_pubkey(self, pubkey_s, serverid, shnum, lp):
+    def _try_to_set_pubkey(self, pubkey_s, server, shnum, lp):
         if self._node.get_pubkey():
             return # don't go through this again if we don't have to
         fingerprint = hashutil.ssk_pubkey_fingerprint_hash(pubkey_s)
         assert len(fingerprint) == 32
         if fingerprint != self._node.get_fingerprint():
-            raise CorruptShareError(serverid, shnum,
-                                "pubkey doesn't match fingerprint")
+            raise CorruptShareError(server.get_serverid(), shnum,
+                                    "pubkey doesn't match fingerprint")
         self._node._populate_pubkey(self._deserialize_pubkey(pubkey_s))
         assert self._node.get_pubkey()
 
 
-    def notify_server_corruption(self, serverid, shnum, reason):
-        ss = self._servermap.connections[serverid]
+    def notify_server_corruption(self, server, shnum, reason):
+        ss = server.get_rref()
         ss.callRemoteOnly("advise_corrupt_share",
                           "mutable", self._storage_index, shnum, reason)
 
 
-    def _got_signature_one_share(self, results, shnum, serverid, lp):
+    def _got_signature_one_share(self, results, shnum, server, lp):
         # It is our job to give versioninfo to our caller. We need to
         # raise CorruptShareError if the share is corrupt for any
         # reason, something that our caller will handle.
-        self.log(format="_got_results: got shnum #%(shnum)d from serverid %(serverid)s",
+        self.log(format="_got_results: got shnum #%(shnum)d from serverid %(name)s",
                  shnum=shnum,
-                 serverid=idlib.shortnodeid_b2a(serverid),
+                 name=server.get_name(),
                  level=log.NOISY,
                  parent=lp)
         if not self._running:
@@ -840,14 +850,14 @@ class ServermapUpdater:
             assert self._node.get_pubkey()
             valid = self._node.get_pubkey().verify(prefix, signature[1])
             if not valid:
-                raise CorruptShareError(serverid, shnum,
+                raise CorruptShareError(server.get_serverid(), shnum,
                                         "signature is invalid")
 
         # ok, it's a valid verinfo. Add it to the list of validated
         # versions.
         self.log(" found valid version %d-%s from %s-sh%d: %d-%d/%d/%d"
                  % (seqnum, base32.b2a(root_hash)[:4],
-                    idlib.shortnodeid_b2a(serverid), shnum,
+                    server.get_name(), shnum,
                     k, n, segsize, datalen),
                     parent=lp)
         self._valid_versions.add(verinfo)
@@ -857,8 +867,8 @@ class ServermapUpdater:
         # version info again, that its signature checks out and that
         # we're okay to skip the signature-checking step.
 
-        # (serverid, shnum) are bound in the method invocation.
-        if (serverid, shnum) in self._servermap.bad_shares:
+        # (server, shnum) are bound in the method invocation.
+        if (server, shnum) in self._servermap.bad_shares:
             # we've been told that the rest of the data in this share is
             # unusable, so don't add it to the servermap.
             self.log("but we've been told this is a bad share",
@@ -867,9 +877,9 @@ class ServermapUpdater:
 
         # Add the info to our servermap.
         timestamp = time.time()
-        self._servermap.add_new_share(serverid, shnum, verinfo, timestamp)
+        self._servermap.add_new_share(server, shnum, verinfo, timestamp)
         # and the versionmap
-        self.versionmap.add(verinfo, (shnum, serverid, timestamp))
+        self.versionmap.add(verinfo, (shnum, server, timestamp))
 
         return verinfo
 
@@ -914,7 +924,7 @@ class ServermapUpdater:
         return verifier
 
 
-    def _try_to_validate_privkey(self, enc_privkey, serverid, shnum, lp):
+    def _try_to_validate_privkey(self, enc_privkey, server, shnum, lp):
         """
         Given a writekey from a remote server, I validate it against the
         writekey stored in my node. If it is valid, then I set the
@@ -924,22 +934,22 @@ class ServermapUpdater:
         alleged_writekey = hashutil.ssk_writekey_hash(alleged_privkey_s)
         if alleged_writekey != self._node.get_writekey():
             self.log("invalid privkey from %s shnum %d" %
-                     (idlib.nodeid_b2a(serverid)[:8], shnum),
+                     (server.get_name(), shnum),
                      parent=lp, level=log.WEIRD, umid="aJVccw")
             return
 
         # it's good
         self.log("got valid privkey from shnum %d on serverid %s" %
-                 (shnum, idlib.shortnodeid_b2a(serverid)),
+                 (shnum, server.get_name()),
                  parent=lp)
         privkey = rsa.create_signing_key_from_string(alleged_privkey_s)
         self._node._populate_encprivkey(enc_privkey)
         self._node._populate_privkey(privkey)
         self._need_privkey = False
-        self._status.set_privkey_from(serverid)
+        self._status.set_privkey_from(server)
 
 
-    def _add_lease_failed(self, f, serverid, storage_index):
+    def _add_lease_failed(self, f, server, storage_index):
         # Older versions of Tahoe didn't handle the add-lease message very
         # well: <=1.1.0 throws a NameError because it doesn't implement
         # remote_add_lease(), 1.2.0/1.3.0 throw IndexError on unknown buckets
@@ -959,20 +969,20 @@ class ServermapUpdater:
                 # this may ignore a bit too much, but that only hurts us
                 # during debugging
                 return
-            self.log(format="error in add_lease from [%(serverid)s]: %(f_value)s",
-                     serverid=idlib.shortnodeid_b2a(serverid),
+            self.log(format="error in add_lease from [%(name)s]: %(f_value)s",
+                     name=server.get_name(),
                      f_value=str(f.value),
                      failure=f,
                      level=log.WEIRD, umid="iqg3mw")
             return
         # local errors are cause for alarm
         log.err(f,
-                format="local error in add_lease to [%(serverid)s]: %(f_value)s",
-                serverid=idlib.shortnodeid_b2a(serverid),
+                format="local error in add_lease to [%(name)s]: %(f_value)s",
+                name=server.get_name(),
                 f_value=str(f.value),
                 level=log.WEIRD, umid="ZWh6HA")
 
-    def _query_failed(self, f, serverid):
+    def _query_failed(self, f, server):
         if not self._running:
             return
         level = log.WEIRD
@@ -981,20 +991,20 @@ class ServermapUpdater:
         self.log(format="error during query: %(f_value)s",
                  f_value=str(f.value), failure=f,
                  level=level, umid="IHXuQg")
-        self._must_query.discard(serverid)
-        self._queries_outstanding.discard(serverid)
-        self._bad_servers.add(serverid)
+        self._must_query.discard(server)
+        self._queries_outstanding.discard(server)
+        self._bad_servers.add(server)
         self._servermap.problems.append(f)
         # a serverid could be in both ServerMap.reachable_servers and
         # .unreachable_servers if they responded to our query, but then an
         # exception was raised in _got_results.
-        self._servermap.unreachable_servers.add(serverid)
+        self._servermap.unreachable_servers.add(server)
         self._queries_completed += 1
         self._last_failure = f
 
 
-    def _privkey_query_failed(self, f, serverid, shnum, lp):
-        self._queries_outstanding.discard(serverid)
+    def _privkey_query_failed(self, f, server, shnum, lp):
+        self._queries_outstanding.discard(server)
         if not self._running:
             return
         level = log.WEIRD
@@ -1113,15 +1123,15 @@ class ServermapUpdater:
             states = []
             found_boundary = False
 
-            for i,(serverid,ss) in enumerate(self.full_serverlist):
-                if serverid in self._bad_servers:
+            for i,server in enumerate(self.full_serverlist):
+                if server in self._bad_servers:
                     # query failed
                     states.append("x")
-                    #self.log("loop [%s]: x" % idlib.shortnodeid_b2a(serverid))
-                elif serverid in self._empty_servers:
+                    #self.log("loop [%s]: x" % server.get_name())
+                elif server in self._empty_servers:
                     # no shares
                     states.append("0")
-                    #self.log("loop [%s]: 0" % idlib.shortnodeid_b2a(serverid))
+                    #self.log("loop [%s]: 0" % server.get_name())
                     if last_found != -1:
                         num_not_found += 1
                         if num_not_found >= self.EPSILON:
@@ -1131,16 +1141,16 @@ class ServermapUpdater:
                             found_boundary = True
                             break
 
-                elif serverid in self._good_servers:
+                elif server in self._good_servers:
                     # yes shares
                     states.append("1")
-                    #self.log("loop [%s]: 1" % idlib.shortnodeid_b2a(serverid))
+                    #self.log("loop [%s]: 1" % server.get_name())
                     last_found = i
                     num_not_found = 0
                 else:
                     # not responded yet
                     states.append("?")
-                    #self.log("loop [%s]: ?" % idlib.shortnodeid_b2a(serverid))
+                    #self.log("loop [%s]: ?" % server.get_name())
                     last_not_responded = i
                     num_not_responded += 1
 
@@ -1193,12 +1203,12 @@ class ServermapUpdater:
 
         self.log(format="sending %(more)d more queries: %(who)s",
                  more=len(more_queries),
-                 who=" ".join(["[%s]" % idlib.shortnodeid_b2a(serverid)
-                               for (serverid,ss) in more_queries]),
+                 who=" ".join(["[%s]" % server.get_name()
+                               for server in more_queries]),
                  level=log.NOISY)
 
-        for (serverid, ss) in more_queries:
-            self._do_query(ss, serverid, self._storage_index, self._read_size)
+        for server in more_queries:
+            self._do_query(server, self._storage_index, self._read_size)
             # we'll retrigger when those queries come back
 
     def _done(self):

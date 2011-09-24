@@ -252,24 +252,23 @@ class Publish:
         # This is set at the last step of the publishing process.
         self.versioninfo = ""
 
+        # SDMF files are updated differently.
+        self._version = MDMF_VERSION
+        writer_class = MDMFSlotWriteProxy
+        self.writers = {}
+
         # we use the servermap to populate the initial goal: this way we will
         # try to update each existing share in place. Since we're
         # updating, we ignore damaged and missing shares -- callers must
         # do a repair to repair and recreate these.
-        for (serverid, shnum) in self._servermap.servermap:
+        for (server, shnum) in self._servermap.get_servermap2():
+            serverid = server.get_serverid()
             self.goal.add( (serverid, shnum) )
             self.connections[serverid] = self._servermap.connections[serverid]
-        self.writers = {}
 
-        # SDMF files are updated differently.
-        self._version = MDMF_VERSION
-        writer_class = MDMFSlotWriteProxy
-
-        # For each (serverid, shnum) in self.goal, we make a
-        # write proxy for that server. We'll use this to write
-        # shares to the server.
-        for key in self.goal:
-            serverid, shnum = key
+            # For each (serverid, shnum) in self.goal, we make a
+            # write proxy for that server. We'll use this to write
+            # shares to the server.
             write_enabler = self._node.get_write_enabler(serverid)
             renew_secret = self._node.get_renewal_secret(serverid)
             cancel_secret = self._node.get_cancel_secret(serverid)
@@ -284,9 +283,11 @@ class Publish:
                                                 self.total_shares,
                                                 self.segment_size,
                                                 self.datalength)
+            self.writers[shnum].server = server
             self.writers[shnum].serverid = serverid
-            assert (serverid, shnum) in self._servermap.servermap
-            old_versionid, old_timestamp = self._servermap.servermap[key]
+            smap = self._servermap.get_servermap()
+            assert (serverid, shnum) in smap
+            old_versionid, old_timestamp = smap[key]
             (old_seqnum, old_root_hash, old_salt, old_segsize,
              old_datalength, old_k, old_N, old_prefix,
              old_offsets_tuple) = old_versionid
@@ -451,7 +452,7 @@ class Publish:
 
         # we use the servermap to populate the initial goal: this way we will
         # try to update each existing share in place.
-        for (serverid, shnum) in self._servermap.servermap:
+        for (serverid, shnum) in self._servermap.get_servermap():
             self.goal.add( (serverid, shnum) )
             self.connections[serverid] = self._servermap.connections[serverid]
         # then we add in all the shares that were bad (corrupted, bad
@@ -490,8 +491,9 @@ class Publish:
                                                 self.segment_size,
                                                 self.datalength)
             self.writers[shnum].serverid = serverid
-            if (serverid, shnum) in self._servermap.servermap:
-                old_versionid, old_timestamp = self._servermap.servermap[key]
+            smap = self._servermap.get_servermap()
+            if (serverid, shnum) in smap:
+                old_versionid, old_timestamp = smap[key]
                 (old_seqnum, old_root_hash, old_salt, old_segsize,
                  old_datalength, old_k, old_N, old_prefix,
                  old_offsets_tuple) = old_versionid
