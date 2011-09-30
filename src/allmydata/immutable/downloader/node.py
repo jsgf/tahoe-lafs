@@ -475,9 +475,9 @@ class DownloadNode:
         assert self.segment_size is not None
         offset = segnum * self.segment_size
 
-        h = hashutil.crypttext_segment_hash(segment)
+        #h = hashutil.crypttext_segment_hash(segment)
         try:
-            self.ciphertext_hash_tree.set_hashes(leaves={segnum: h})
+            #self.ciphertext_hash_tree.set_hashes(leaves={segnum: h})
             return (offset, segment, decodetime)
         except (BadHashError, NotEnoughHashesError):
             format = ("hash failure in ciphertext_hash_tree:"
