@@ -114,7 +114,8 @@ class ServerMap:
 
     def __init__(self):
         self.servermap = {}
-        self.connections = {}
+        self.connections = {} # XXX this will go away
+        self.id_to_server = {} # XXX this is temporary
         self.unreachable_servers = set() # serverids that didn't respond to queries
         self.reachable_servers = set() # serverids that did respond to queries
         self.problems = [] # mostly for debugging
@@ -126,6 +127,7 @@ class ServerMap:
     def copy(self):
         s = ServerMap()
         s.servermap = self.servermap.copy() # tuple->tuple
+        s.id_to_server = self.id_to_server.copy()
         s.connections = self.connections.copy() # str->RemoteReference
         s.unreachable_servers = set(self.unreachable_servers)
         s.reachable_servers = set(self.reachable_servers)
@@ -464,8 +466,11 @@ class ServermapUpdater:
 
         sb = self._storage_broker
         # All of the servers, permuted by the storage index, as usual.
+        all_servers = sb.get_servers_for_psi(self._storage_index)
+        for s in all_servers:
+            self._servermap.id_to_server[s.get_serverid()] = s
         full_serverlist = [(s.get_serverid(), s.get_rref())
-                           for s in sb.get_servers_for_psi(self._storage_index)]
+                           for s in all_servers]
         self.full_serverlist = full_serverlist # for use later, immutable
         self.extra_servers = full_serverlist[:] # servers are removed as we use them
         self._good_servers = set() # servers who had some shares
