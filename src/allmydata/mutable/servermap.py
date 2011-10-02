@@ -116,7 +116,7 @@ class ServerMap:
         self.servermap = {}
         self.connections = {} # XXX this will go away
         self.id_to_server = {} # XXX this is temporary
-        self.unreachable_servers = set() # serverids that didn't respond to queries
+        self.unreachable_servers = set() # servers that didn't respond to queries
         self.reachable_servers = set() # serverids that did respond to queries
         self.problems = [] # mostly for debugging
         self.bad_shares = {} # maps (serverid,shnum) to old checkstring
@@ -136,6 +136,11 @@ class ServerMap:
         s.last_update_mode = self.last_update_mode
         s.last_update_time = self.last_update_time
         return s
+
+    def mark_server_unreachable(self, serverid):
+        # XXX this will change to take an IServer, not serverid
+        server = self.id_to_server[serverid]
+        self.unreachable_servers.add(server)
 
     def mark_bad_share(self, serverid, shnum, checkstring):
         """This share was found to be bad, either in the checkstring or
@@ -998,7 +1003,7 @@ class ServermapUpdater:
         # a serverid could be in both ServerMap.reachable_servers and
         # .unreachable_servers if they responded to our query, but then an
         # exception was raised in _got_results.
-        self._servermap.unreachable_servers.add(serverid)
+        self._servermap.mark_server_unreachable(serverid)
         self._queries_completed += 1
         self._last_failure = f
 
