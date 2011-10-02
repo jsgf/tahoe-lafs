@@ -119,7 +119,7 @@ class ServerMap:
         self.id_to_server = {} # XXX this is temporary
         self.unreachable_servers = set() # servers that didn't respond to queries
         self.reachable_servers = set() # servers that did respond to queries
-        self.problems = [] # mostly for debugging
+        self._problems = [] # mostly for debugging
         self._bad_shares = {} # maps (serverid,shnum) to old checkstring
         self.last_update_mode = None
         self.last_update_time = 0
@@ -132,7 +132,7 @@ class ServerMap:
         s.connections = self.connections.copy() # str->RemoteReference
         s.unreachable_servers = set(self.unreachable_servers)
         s.reachable_servers = set(self.reachable_servers)
-        s.problems = self.problems[:]
+        s._problems = self._problems[:]
         s._bad_shares = self._bad_shares.copy() # tuple->str
         s.last_update_mode = self.last_update_mode
         s.last_update_time = self.last_update_time
@@ -174,6 +174,11 @@ class ServerMap:
         self._bad_shares.pop(key, None)
         self._known_shares[key] = (verinfo, timestamp)
 
+    def add_problem(self, f):
+        self._problems.append(f)
+    def get_problems(self):
+        return self._problems
+
     def dump(self, out=sys.stdout):
         print >>out, "servermap:"
 
@@ -184,9 +189,9 @@ class ServerMap:
                           (idlib.shortnodeid_b2a(serverid), shnum,
                            seqnum, base32.b2a(root_hash)[:4], k, N,
                            datalength))
-        if self.problems:
-            print >>out, "%d PROBLEMS" % len(self.problems)
-            for f in self.problems:
+        if self._problems:
+            print >>out, "%d PROBLEMS" % len(self._problems)
+            for f in self._problems:
                 print >>out, str(f)
         return out
 
@@ -650,7 +655,7 @@ class ServermapUpdater:
         # XXX: Use the reader for this?
         checkstring = data[:SIGNED_PREFIX_LENGTH]
         self._servermap.mark_bad_share(serverid, shnum, checkstring)
-        self._servermap.problems.append(f)
+        self._servermap.add_problem(f)
 
 
     def _cache_good_sharedata(self, verinfo, shnum, now, data):
@@ -1015,7 +1020,7 @@ class ServermapUpdater:
         self._must_query.discard(serverid)
         self._queries_outstanding.discard(serverid)
         self._bad_servers.add(serverid)
-        self._servermap.problems.append(f)
+        self._servermap.add_problem(f)
         # a serverid could be in both ServerMap.reachable_servers and
         # .unreachable_servers if they responded to our query, but then an
         # exception was raised in _got_results.
@@ -1034,7 +1039,7 @@ class ServermapUpdater:
         self.log(format="error during privkey query: %(f_value)s",
                  f_value=str(f.value), failure=f,
                  parent=lp, level=level, umid="McoJ5w")
-        self._servermap.problems.append(f)
+        self._servermap.add_problem(f)
         self._last_failure = f
 
 
