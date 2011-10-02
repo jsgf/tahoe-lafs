@@ -126,7 +126,7 @@ class ServerMap:
 
     def copy(self):
         s = ServerMap()
-        s.servermap = self._known_shares.copy() # tuple->tuple
+        s._known_shares = self._known_shares.copy() # tuple->tuple
         s.id_to_server = self.id_to_server.copy()
         s.connections = self.connections.copy() # str->RemoteReference
         s.unreachable_servers = set(self.unreachable_servers)
