@@ -162,10 +162,10 @@ class DirectoryNodeHandler(RenderMixin, rend.Page, ReplaceMeMixin):
 
         if not self.node.is_mutable():
             si = self.node.get_storage_index()
-            if si and req.setETag('DIR-IMM:%s-%s' % (base32.b2a(si), t or "")):
+            if si and req.setETag('DIR-IMM:%s-%s' % (base32.b2a(si), t or "html")):
                 return ""
 
-        if not t:
+        if not t or t == "html":
             # render the directory as HTML, using the docFactory and Nevow's
             # whole templating thing.
             return DirectoryAsHTML(self.node,
