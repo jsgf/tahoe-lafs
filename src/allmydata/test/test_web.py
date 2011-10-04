@@ -3911,6 +3911,43 @@ class Web(WebMixin, WebErrorMixin, testutil.StallMixin, testutil.ReallyEqualMixi
         d.addCallback(_check)
         return d
 
+    def test_GET_File_ETag(self):
+        d = self.GET(self.public_url + "/foo/bar.txt", return_response=True)
+        #d.addCallback(self.failUnlessETag)
+        # Repeat with each t= format, making sure each gets a unique ETag
+
+    def test_GET_File_ETag_cond(self):
+        """Do conditional GET on bar.txt with ETag from prev test,
+        check for 304 response; retest with each t= format"""
+        d = self.GET(self.public_url + "/foo/bar.txt", return_response=True,
+                     header={"If-None-Match", etag})
+        # d.addCallback(self.failUnless304)
+        pass
+
+    def test_GET_File_ETag_cond_fail(self):
+        """Do conditional GET on bar.txt with invalid ETag,
+        check for full file contents; retest with each t= format"""
+        d = self.GET(self.public_url + "/foo/bar.txt", return_response=True,
+                     header={"If-None-Match", "badetag"})
+        # d.addCallback(self.failUnlessIsBarDotTxt)
+        pass
+
+    def test_HEAD_File_ETag(self):
+        """Do HEAD on bar.txt with each t= format, making sure the
+        request either fails or matches the GET ETag"""
+        pass
+
+    def test_GET_DIR_ETag(self):
+        """Do GET on directory, making sure ETag is distinct from
+        underlying file.  Repeat test with each t= format, making sure
+        each gets unique ETag"""
+        pass
+
+    def test_GET_DIR_ETag_cond(self):
+        """Do conditional if-non-match with valid ETag GET on
+        directory, for each t= format, making sure we get a 304
+        response"""
+        pass
 
 class Util(ShouldFailMixin, testutil.ReallyEqualMixin, unittest.TestCase):
     def test_load_file(self):
